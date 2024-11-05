@@ -6,16 +6,16 @@ spec:
   name: BlackDuck
   evaluation_strategy: AVERAGE
   metric_monitoring_list:
-    - name: Security Risk
+    - name: License Risk
       metric_evaluation_strategy: PICK_HIGHEST
-      source_key: security_risk
+      source_key: license_risk
       metric_aggregation_strategy: PER_SCAN
       source_url: 'http://example-api.com'
       data_source_type: CSV
       metric_parameters:
-        - source_path_index: 0
+        - source_path_index: 1
           data_type: INT
-          name: security_risk
+          name: license_risk
           default_display_parameter: true
           metal_rating_evaluation:
             - metal_rating: ELITE
@@ -32,16 +32,16 @@ spec:
             - metal_rating: LOW
               operator: LESS_THAN_EQUAL_TO
               value: 20
-    - name: License Risk
+    - name: Vulnerability Risk
       metric_evaluation_strategy: PICK_HIGHEST
-      source_key: license_risk
+      source_key: vulnerability_risk
       metric_aggregation_strategy: PER_SCAN
       source_url: 'http://example-api.com'
       data_source_type: CSV
       metric_parameters:
-        - source_path_index: 1
+        - source_path_index: 4
           data_type: INT
-          name: license_risk
+          name: vulnerability_risk
           default_display_parameter: true
           metal_rating_evaluation:
             - metal_rating: ELITE
@@ -68,6 +68,58 @@ spec:
         - source_path_index: 2
           data_type: INT
           name: operational_risk
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
+    - name: Activity Risk
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: activity_risk
+      metric_aggregation_strategy: PER_SCAN
+      source_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 3
+          data_type: INT
+          name: activity_risk
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
+    - name: Version Risk
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: version_risk
+      metric_aggregation_strategy: PER_SCAN
+      source_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 0
+          data_type: INT
+          name: version_risk
           default_display_parameter: true
           metal_rating_evaluation:
             - metal_rating: ELITE
