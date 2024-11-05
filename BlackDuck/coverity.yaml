@@ -1,0 +1,86 @@
+version: api/v1
+kind: BPGenericResource
+metadata:
+  BP_RESOURCE_TYPE: BP_METRIC_GROUP
+spec:
+  name: BlackDuck
+  evaluation_strategy: AVERAGE
+  metric_monitoring_list:
+    - name: Security Risk
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: security_risk
+      metric_aggregation_strategy: PER_SCAN
+      source_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 0
+          data_type: INT
+          name: security_risk
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: GREATER_THAN_EQUAL_TO
+              value: 75
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 50
+              upper_limit: 75
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 20
+              upper_limit: 50
+            - metal_rating: LOW
+              operator: LESS_THAN_EQUAL_TO
+              value: 20
+    - name: License Risk
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: license_risk
+      metric_aggregation_strategy: PER_SCAN
+      source_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 1
+          data_type: INT
+          name: license_risk
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
+    - name: Operational Risk
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: operational_risk
+      metric_aggregation_strategy: PER_SCAN
+      source_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 2
+          data_type: INT
+          name: operational_risk
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10

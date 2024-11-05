@@ -1,0 +1,138 @@
+version: api/v1
+kind: BPGenericResource
+metadata:
+  BP_RESOURCE_TYPE: BP_METRIC_GROUP
+spec:
+  name: SonarQube
+  evaluation_strategy: AVERAGE
+  metric_monitoring_list:
+    - name: Blocker Violations
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: sonarqube_blocker_violations
+      metric_aggregation_strategy: PER_SCAN
+      metric_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 0
+          data_type: INT
+          name: sonarqube_blocker_violations
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
+    - name: Bugs
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: sonarqube_bugs
+      metric_aggregation_strategy: PER_SCAN
+      metric_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 4
+          data_type: INT
+          name: sonarqube_bugs
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
+    - name: Security Rating
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: sonarqube_security_rating
+      metric_aggregation_strategy: PER_SCAN
+      metric_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 11
+          data_type: INT
+          name: sonarqube_security_rating
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: GREATER_THAN_EQUAL_TO
+              value: 75
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 50
+              upper_limit: 75
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 20
+              upper_limit: 50
+            - metal_rating: LOW
+              operator: LESS_THAN_EQUAL_TO
+              value: 20
+    - name: Code Smells
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: sonarqube_code_smells
+      metric_aggregation_strategy: PER_SCAN
+      metric_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 14
+          data_type: INT
+          name: sonarqube_code_smells
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
+    - name: Major Violations
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: sonarqube_major_violations
+      metric_aggregation_strategy: PER_SCAN
+      metric_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 20
+          data_type: INT
+          name: sonarqube_major_violations
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
