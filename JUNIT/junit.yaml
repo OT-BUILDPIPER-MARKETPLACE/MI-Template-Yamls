@@ -1,0 +1,36 @@
+version: api/v1
+kind: BPGenericResource
+metadata:
+  BP_RESOURCE_TYPE: BP_METRIC_GROUP
+spec:
+  name: JUnit
+  evaluation_strategy: AVERAGE
+  metric_monitoring_list:
+    - name: JUnit
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: JUNIT
+      metric_aggregation_strategy: PER_SCAN
+      source_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 0
+          data_type: PERCENTAGE
+          name: total_test_result
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: BETWEEN
+              lower_limit: 75
+              upper_limit: 100
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 50
+              upper_limit: 75
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 25
+              upper_limit: 50
+            - metal_rating: LOW
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 25
