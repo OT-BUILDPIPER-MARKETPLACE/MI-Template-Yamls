@@ -1,0 +1,138 @@
+version: api/v1
+kind: BPGenericResource
+metadata:
+  BP_RESOURCE_TYPE: BP_METRIC_GROUP
+spec:
+  name: Coverity
+  evaluation_strategy: AVERAGE
+  metric_monitoring_list:
+    - name: High Impact Count
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: high_impact_count
+      metric_aggregation_strategy: PER_SCAN
+      source_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 0
+          data_type: INT
+          name: high_impact_count
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: GREATER_THAN_EQUAL_TO
+              value: 75
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 50
+              upper_limit: 75
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 20
+              upper_limit: 50
+            - metal_rating: LOW
+              operator: LESS_THAN_EQUAL_TO
+              value: 20
+    - name: Outstanding Count
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: outstanding_count
+      metric_aggregation_strategy: PER_SCAN
+      source_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 1
+          data_type: INT
+          name: outstanding_count
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
+    - name: Triaged Count
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: triaged_count
+      metric_aggregation_strategy: PER_SCAN
+      source_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 2
+          data_type: INT
+          name: triaged_count
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
+    - name: Security Issues Count
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: security_issues_count
+      metric_aggregation_strategy: PER_SCAN
+      source_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 3
+          data_type: INT
+          name: security_issues_count
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
+    - name: Quality Issues Count
+      metric_evaluation_strategy: PICK_HIGHEST
+      source_key: quality_issues_count
+      metric_aggregation_strategy: PER_SCAN
+      source_url: 'http://example-api.com'
+      data_source_type: CSV
+      metric_parameters:
+        - source_path_index: 4
+          data_type: INT
+          name: quality_issues_count
+          default_display_parameter: true
+          metal_rating_evaluation:
+            - metal_rating: ELITE
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
+            - metal_rating: HIGH
+              operator: BETWEEN
+              lower_limit: 0
+              upper_limit: 5
+            - metal_rating: MEDIUM
+              operator: BETWEEN
+              lower_limit: 5
+              upper_limit: 10
+            - metal_rating: LOW
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
