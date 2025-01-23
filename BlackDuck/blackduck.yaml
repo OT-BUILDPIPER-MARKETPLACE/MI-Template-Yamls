@@ -19,19 +19,19 @@ spec:
           default_display_parameter: true
           metal_rating_evaluation:
             - metal_rating: ELITE
-              operator: GREATER_THAN_EQUAL_TO
-              value: 75
+              operator: LESS_THAN_EQUAL_TO
+              value: 0
             - metal_rating: HIGH
               operator: BETWEEN
-              lower_limit: 50
-              upper_limit: 75
+              lower_limit: 0
+              upper_limit: 5
             - metal_rating: MEDIUM
               operator: BETWEEN
-              lower_limit: 20
-              upper_limit: 50
+              lower_limit: 5
+              upper_limit: 10
             - metal_rating: LOW
-              operator: LESS_THAN_EQUAL_TO
-              value: 20
+              operator: GREATER_THAN_EQUAL_TO
+              value: 10
     - name: Vulnerability Risk
       metric_evaluation_strategy: PICK_HIGHEST
       source_key: vulnerability_risk
