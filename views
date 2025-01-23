@@ -1,0 +1,1287 @@
+from django.shortcuts import render
+from rest_framework.views import APIView
+
+from metric_dashboard.scripts.dummy_data import airtelWorks, code_quality, dora_metric_data_upload
+from .models import *
+from .serializers import *
+from rest_framework.response import Response
+from datetime import datetime
+from django.db.models import Prefetch
+from rest_framework.response import Response
+from rest_framework import status
+from collections import defaultdict
+from rest_framework.permissions import AllowAny
+from django.utils import timezone
+from pathlib import Path
+from rest_framework.permissions import AllowAny
+from .utils import list_of_file_handler, trigger_task_to_generate_git_repo_data
+import pandas as pd
+import os
+from rest_framework.pagination import LimitOffsetPagination
+
+# Create your views here.
+from .utils import *
+from django.conf import settings
+from django.db.models import Count
+import logging
+LOGGER = logging.getLogger('django')
+
+class MeturityInsights(APIView):
+
+    def get(self, request):
+        type_param = request.query_params.get('type', None)
+        metric_group_param = request.query_params.get('metric_group', None)
+        application_param = request.query_params.get('application', None)
+        service_param = request.query_params.get('services', None)
+
+        org = settings.TENENT
+
+        if application_param == 'all' or application_param is None:
+            app_ser_map_objects = ApplicationServiceMapping.objects.filter(organization=org)
+            if service_param != 'all' and service_param:
+                app_ser_map_objects = app_ser_map_objects.filter(service_name=service_param)
+        else:
+            app_ser_map_objects = ApplicationServiceMapping.objects.filter(application_name=application_param, organization=org)
+            if service_param != 'all' and service_param:
+                app_ser_map_objects = app_ser_map_objects.filter(service_name=service_param)
+
+        if type_param == 'Organization' and metric_group_param == 'all':
+            response_json = self.get_organization_all_metric_group_data(org, app_ser_map_objects)
+        elif type_param == 'Organization' and metric_group_param:
+            response_json = self.get_organization_metric_index_data(org, app_ser_map_objects, metric_group_param)
+        elif type_param=='Teams'  and metric_group_param=='all' and application_param==None:
+            response_json = get_application_data(metric_group_param,org)
+        elif type_param=='Teams' and metric_group_param=='all' and application_param and service_param=='all':
+            response_json=get_service_level_data(metric_group_param,application_param,org)
+        elif type_param=='Teams' and metric_group_param!='all' and application_param and service_param=='all':
+            response_json=get_service_level_data(metric_group_param,application_param,org)
+        elif type_param=='Teams' and metric_group_param!="all" and application_param==None:
+            response_json=get_application_data(metric_group_param,org)
+        elif type_param=='Teams' and metric_group_param=='all' and application_param and service_param==None:
+            response_json=get_application_level_service_data(metric_group_param,application_param,org)
+        elif type_param=='Teams' and metric_group_param!='all' and application_param and service_param==None:
+            response_json=get_application_level_service_data(metric_group_param,application_param,org)
+        elif type_param=='Teams' and metric_group_param!='all' and application_param and service_param=='all':
+            response_json=get_service_level_data(metric_group_param,application_param,org)
+        # elif type_param=='Teams' and metric_group_param=='all' and application_param and service_param=='all':
+        #     print("sndjdkjsd")
+        #     response_json=get_service_level_data(metric_group_param,application_param,org)
+
+        else:
+            return Response({'error': 'Invalid parameters'}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(response_json, status=status.HTTP_200_OK)
+
+    def get_organization_all_metric_group_data(self, org, app_ser_map_objects):
+        app_list = set()
+        service_list = set()
+        month_name_list=get_next_six_month_and_year_names()
+        org_group_json={org:{'metric_group_data':{}}}
+        service_counts_by_application = app_ser_map_objects.values('application_name').annotate(
+            service_count=Count('service_name', distinct=True)
+        )
+        application_count=len(service_counts_by_application)
+        service_count = sum(application['service_count'] for application in service_counts_by_application)
+
+
+        metric_group_list=set(MetricGroupIndex.objects.all().values_list("metric_group__name",flat=True))
+        for metric_group in metric_group_list:
+            self.prepare_metric_group_data_at_org(org, app_ser_map_objects, app_list, service_list, month_name_list, org_group_json, metric_group)
+            if org in org_group_json and metric_group in org_group_json[org]['metric_group_data']  :
+                avg_metal_score=org_group_json[org]['metric_group_data'][metric_group]['overview']['level']/len(app_list)
+                org_group_json[org]['metric_group_data'][metric_group]['overview']['level']=get_metal_name(avg_metal_score)
+                for month_key in month_name_list:
+                    try:
+                        avg_metal_score = org_group_json[org]["metric_group_data"][
+                            metric_group
+                        ]["month_wise_data"][month_key]["level"] / len(app_list)
+                        org_group_json[org]["metric_group_data"][metric_group][
+                            "month_wise_data"
+                        ][month_key]["level"] = get_metal_name(avg_metal_score)
+                        mg=MetricGroup.objects.get(name=metric_group)
+                        org_group_json[org]["metric_group_data"][metric_group]['description']=mg.description
+                        org_group_json[org]["metric_group_data"][metric_group]['icon']=mg.icon
+                    except Exception as e:
+                        print(e)
+        org_group_json[org]['metric_application_count'] = application_count
+        org_group_json[org]['metric_service_count'] = service_count
+
+        return org_group_json
+
+    def prepare_metric_group_data_at_org(self, org, app_ser_map_objects, app_list, service_list, month_name_list, org_group_json, metric_group):
+        monitor_app=set()
+        for app in app_ser_map_objects:
+            if app.application_name in monitor_app:
+                service_list.add(app.service_name)
+                continue
+            app_level_group_data=cache.get(f"{org}.{app.application_name}.group_level",{f"{org}.{app.application_name}.group_level":{"metric_group_data":{}}})
+            monitor_app.add(app.application_name)
+
+            if metric_group not in org_group_json[org]['metric_group_data']:
+                org_group_json[org]['metric_group_data'][metric_group]={"overview":{'level':0},"month_wise_data":{}}
+                
+            if f"{org}.{app.application_name}" in app_level_group_data and   metric_group in app_level_group_data[f"{org}.{app.application_name}"]['metric_group_data']:
+                if get_metal_score(app_level_group_data[f"{org}.{app.application_name}"]['metric_group_data'][metric_group]['overview']['level']):
+                    org_group_json[org]['metric_group_data'][metric_group]['overview']['level']+=get_metal_score(app_level_group_data[f"{org}.{app.application_name}"]['metric_group_data'][metric_group]['overview']['level'])
+                # else:
+                #     org_group_json[org]['metric_group_data'][metric_group]['overview']['level']=None
+            else:
+                app_list.add(app.application_name)
+                service_list.add(app.service_name)
+                continue
+
+            app_list.add(app.application_name)
+            service_list.add(app.service_name)
+
+            for month_key in month_name_list:
+                org_group_json[org]['metric_group_data'][metric_group]['month_wise_data'].setdefault(month_key, {'level': 0})
+                try:
+                    if get_metal_score(app_level_group_data[f"{org}.{app.application_name}"]['metric_group_data'][metric_group]['month_wise_data'][month_key]['level']):
+                        org_group_json[org]['metric_group_data'][metric_group]['month_wise_data'][month_key]['level'] += get_metal_score(app_level_group_data[f"{org}.{app.application_name}"]['metric_group_data'][metric_group]['month_wise_data'][month_key]['level'])
+                except Exception as e:
+                    continue
+    def get_days_hours_with_minutes(self,value):
+        total_hours = int(value) / 60
+                            # Convert hours to days and hours
+        days = total_hours // 24
+        remaining_hours = total_hours % 24
+        return days, remaining_hours
+        
+    def get_organization_metric_index_data(self, org, app_ser_map_objects, metric_group_param):
+        app_list = set()
+        service_list = set()
+        month_name_list=get_next_six_month_names()
+        organization_level_all_application= cache.get(f"organization_level_all_application_mapping.{org}")
+        org_application_list={}
+        # Group by application_name and count the services within each application
+        service_counts_by_application = app_ser_map_objects.values('application_name').annotate(
+            service_count=Count('service_name', distinct=True)
+        )
+        application_count=len(service_counts_by_application)
+        service_count = sum(application['service_count'] for application in service_counts_by_application)
+
+
+        for app_key in organization_level_all_application:
+            application_data=cache.get(app_key)
+            if application_data:
+                org_application_list.update(application_data)
+
+        org_metric_index_data={f"{org}":{"metric_index_data":{}}}
+        metric_group_index_list=MetricGroupIndex.objects.filter(metric_group__name=metric_group_param)
+        for metric_index_instance in metric_group_index_list:
+            metric_index_serialize_data=cache.get(metric_index_instance.name)
+            metric_index=metric_index_instance.name
+            parameter_list=metric_index_serialize_data["metric_parameters"]
+            metric_evaluation_strategy=metric_index_serialize_data['metric_evaluation_strategy']['name']
+            metric_parameters_data = {}
+            metric_data = {}
+            try:
+                if metric_index_serialize_data['metric_aggregation_strategy']['name'] == "PER_PERIOD":
+                    prepare_org_level_sum_aggregation_strategy(organization_level_all_application, org_application_list, metric_index_instance, parameter_list, metric_evaluation_strategy, metric_parameters_data, metric_data)
+                elif metric_index_serialize_data['metric_aggregation_strategy']['name'] == "PER_SCAN":
+                    prepare_org_level_average_aggregation_strategy(org_application_list, metric_index_instance, parameter_list, metric_evaluation_strategy, metric_parameters_data, metric_data)
+            except InvalidApplicationException as e:
+                LOGGER.error(e)
+                continue
+            if (metric_index not in org_metric_index_data[f"{org}"]["metric_index_data"]):
+                org_metric_index_data[f"{org}"]["metric_index_data"][metric_index] = {
+                    "month_wise_data": {}, "overview": {}}
+                org_metric_index_data[f"{org}"]["metric_index_data"][metric_index]["overview"]["metric_data"] = metric_data
+                org_metric_index_data[f"{org}"]["metric_index_data"][
+                    metric_index]["overview"]["metric_parameter_data"] = metric_parameters_data
+                org_metric_index_data[org]["metric_index_data"][metric_index]['description']=metric_index_instance.description
+                org_metric_index_data[org]["metric_index_data"][metric_index]['icon']=metric_index_instance.icon
+                
+                #org_metric_index_data[f"{org}"]["metric_index_data"][
+                #    metric_index]["overview"]["rating"]=get_rating_evolution(app_metric_index_data[f"{org}.{app_name}"]["metric_index_data"][metric_index]["overview"],metric_index,application_service_count=len(application_service))
+            
+            for month in month_name_list:
+                try:
+                    metric_parameters_data = {}
+                    metric_data = {}
+                    if metric_index_serialize_data['metric_aggregation_strategy']['name'] == "PER_PERIOD":
+                        prepare_org_month_sum_aggregation_strategy(org_application_list, metric_index, parameter_list, metric_evaluation_strategy, metric_parameters_data, metric_data, month)
+                    elif metric_index_serialize_data['metric_aggregation_strategy']['name'] == "PER_SCAN":
+                        metric_parameters_data, metric_data = prepare_org_month_average_aggregation_strategy(org_application_list, metric_index, parameter_list, metric_evaluation_strategy, month)
+                except InvalidMonthException as e:
+                    print(str(e))
+                    continue
+                except Exception as e:
+                    print(str(e))
+                    continue
+                else:
+                    if (month not in org_metric_index_data[f"{org}"]["metric_index_data"][metric_index]["month_wise_data"]):
+                        org_metric_index_data[f"{org}"]["metric_index_data"][metric_index]["month_wise_data"][month] = {
+                        }
+                        org_metric_index_data[f"{org}"]["metric_index_data"][
+                            metric_index]["month_wise_data"][month]["metric_data"] = metric_data
+                        org_metric_index_data[f"{org}"]["metric_index_data"][metric_index][
+                            "month_wise_data"][month]["metric_parameter_data"] = metric_parameters_data
+
+        org_metric_index_data[org]['metric_service_count'] = service_count
+        org_metric_index_data[org]['metric_application_count'] = application_count
+
+        return  org_metric_index_data
+
+    def prepare_metric_index_data_at_org(self, org, app_ser_map_objects, metric_group_param, app_list, service_list, month_name_list, org_index_json, metric_index_instance):
+        month_key_list=set()
+        month_name_list=get_next_six_month_names()
+        monitor_app=set()
+        count=0
+        for app in app_ser_map_objects:
+            if app.application_name in monitor_app:
+                service_list.add(app.service_name)
+                continue
+            app_level_index_data=cache.get(f"{org}.{app.application_name}.index_level")
+            monitor_app.add(app.application_name)
+
+            # filter for specific group
+            if metric_index_instance.name not in org_index_json[org]['metric_index_data']:
+                org_index_json[org]['metric_index_data'][metric_index_instance.name]={"overview":{'value': 0, 'level': 0, 'type': None},"month_wise_data":{}}
+                org_index_json[org]['metric_index_data'][metric_index_instance.name].setdefault("overview", {'value': 0, 'level': 0, 'type': None})
+
+            if app_level_index_data and metric_index_instance.name in app_level_index_data[f"{org}.{app.application_name}"]['metric_index_data']:
+                org_index_json[org]['metric_index_data'][metric_index_instance.name]['overview']['level']+=get_metal_score(app_level_index_data[f"{org}.{app.application_name}"]['metric_index_data'][metric_index_instance.name]['overview']['metric_data']['level'])
+                org_index_json[org]['metric_index_data'][metric_index_instance.name]['overview']['type']=app_level_index_data[f"{org}.{app.application_name}"]['metric_index_data'][metric_index_instance.name]['overview']['metric_data']['type']
+                org_index_json[org]['metric_index_data'][metric_index_instance.name]['overview']['value']+=app_level_index_data[f"{org}.{app.application_name}"]['metric_index_data'][metric_index_instance.name]['overview']['metric_data']['value']
+                org_index_json[org]["metric_index_data"][metric_index_instance.name]['description']=metric_index_instance.description
+                org_index_json[org]["metric_index_data"][metric_index_instance.name]['icon']=metric_index_instance.icon
+                count+=1
+            else:
+                app_list.add(app.application_name) 
+                service_list.add(app.service_name)
+                continue                                                                             
+
+            app_list.add(app.application_name) 
+            service_list.add(app.service_name)
+
+            month_list=MetricDataMonthWise.objects.filter(application_service_mapping__application_name=app.application_name,metric_group_index=metric_index_instance,month__in=month_name_list)
+            monitor_month_list=set()
+            
+            for month in month_list:
+                month_key = f'{month.month} {month.year_metric_data.year}'
+                
+                if month_key in monitor_month_list:
+                    continue
+
+                if month_key not in org_index_json[org]['metric_index_data'][metric_index_instance.name]['month_wise_data']:
+                    org_index_json[org]['metric_index_data'][metric_index_instance.name]['month_wise_data'].setdefault(month_key, {'value': 0, 'level': 0, 'type': None})
+                try:
+                    org_index_json[org]['metric_index_data'][metric_index_instance.name]['month_wise_data'][month_key]['value'] += app_level_index_data[f"{org}.{app.application_name}"]['metric_index_data'][metric_index_instance.name]['month_wise_data'][month_key]['metric_data']['value']
+                    org_index_json[org]['metric_index_data'][metric_index_instance.name]['month_wise_data'][month_key]['level'] += get_metal_score(app_level_index_data[f"{org}.{app.application_name}"]['metric_index_data'][metric_index_instance.name]['month_wise_data'][month_key]['metric_data']['level'])
+                    org_index_json[org]['metric_index_data'][metric_index_instance.name]['month_wise_data'][month_key]['type'] = app_level_index_data[f"{org}.{app.application_name}"]['metric_index_data'][metric_index_instance.name]['month_wise_data'][month_key]['metric_data']['type'] 
+                    month_key_list.add(month_key)
+                except Exception as e:
+                    LOGGER.error(e)
+                monitor_month_list.add(month_key)
+            
+        return list(month_key_list),count
+    
+    
+
+class MetricMonitoringApiView(APIView):
+
+    permission_classes=[AllowAny]
+    def post(self,request):
+    
+        request_data=request.data
+
+        state,message=analyse_metric_and_save_to_table(metric=request_data)
+        if state:    
+            return Response({"details":message},status=status.HTTP_200_OK)
+        else:
+            return Response({'details':message},status=status.HTTP_400_BAD_REQUEST)
+    
+
+class MetricMetalRatingApiView(APIView):
+
+    def get(self,request):
+        metal_rating_list=MetalRating.objects.all()
+        serializer=MetalRatingSerializer(metal_rating_list,many=True)
+        return Response({"details":serializer.data},status=status.HTTP_200_OK)
+
+
+class test(APIView):
+
+    from rest_framework.permissions import AllowAny
+    permission_classes=[AllowAny]
+
+    def get(self,request):
+
+        # store_in_cache
+        cache_all_data()
+        return Response({"details":"data is push successfully"},status=status.HTTP_200_OK)
+
+
+class MetricGroupApiview(APIView):
+    def get(self,request):
+        metric_gtoups_name=MetricGroup.objects.filter()
+        s=MetricGroupSerializer(metric_gtoups_name,many=True)
+        return Response(s.data,status=status.HTTP_200_OK)
+
+
+class DeployInsightApiView(APIView):
+
+    from rest_framework.permissions import AllowAny
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        request_data = request.data
+        # analyse data for deploy insights and save to db
+        change_ticket_id = request_data['change_ticket_id']
+        if(change_ticket_id==None):
+            change_ticket = ChangeTicket.objects.latest('id')
+            id = change_ticket.id
+            request_data['change_ticket_id']='BP-ticket-'+str(id)
+
+        serializer = DeployInsightSerializer(data=request_data)
+        if serializer.is_valid():
+            serializer.save()
+        else:
+            print(serializer.errors)
+        return Response(
+            {"details": "data is push successfully"}, status=status.HTTP_200_OK
+        )
+
+
+class DeployInsightDataApiView(APIView):
+    from rest_framework.permissions import AllowAny
+
+    permission_classes = [AllowAny]
+
+    def convert_string_to_list(self, input_string, type_of_string=None):
+        if input_string == "null":
+            return None
+        output_list = input_string.strip("[]").split(",")
+        if type_of_string == "int":
+            integer_list = [int(x) for x in output_list]
+            return integer_list
+
+        return output_list
+
+    def get(self, request):
+        application = self.convert_string_to_list(
+            self.request.query_params.get("application", None)
+        )
+        service = self.convert_string_to_list(
+            self.request.query_params.get("service", None)
+        )
+        business_function = self.convert_string_to_list(
+            self.request.query_params.get("business_function", None)
+        )
+        start_date = self.request.query_params.get("start_date", None)
+        end_date = self.request.query_params.get("end_date", None)
+        print(
+            "sl_00023rser=========================================>",
+            application,
+            service,
+            business_function,
+        )
+        change_tickets = ChangeTicket.objects.all()
+        if application:
+            applications = Application.objects.filter(name__in=application)
+            change_tickets = ChangeTicketApplicationMapping.objects.filter(
+                application__in=applications
+            ).values_list("change_ticket", flat=True)
+            change_tickets = ChangeTicket.objects.filter(pk__in=change_tickets)
+        if service:
+            # write here code
+            services = Services.objects.filter(service_name__in=service)
+            change_tickets_service = ImpactedServicesChangeTicketMapping.objects.filter(
+                service__in=services
+            ).values_list("change_ticket_application__change_ticket", flat=True)
+            change_tickets_service = ChangeTicket.objects.filter(
+                pk__in=change_tickets_service
+            )
+
+            if application:
+                change_tickets = change_tickets.filter(
+                    pk__in=change_tickets_service.values_list("pk", flat=True)
+                )
+            else:
+                change_tickets = change_tickets_service
+        if business_function:
+            business_function_objects = BusinessFunctions.objects.filter(
+                name__in=business_function
+            )
+            services_related_to_business_function = (
+                ServiceBusinessFunctionMapping.objects.filter(
+                    business_function__in=business_function_objects
+                ).values_list("service", flat=True)
+            )
+            change_tickets_business_function = (
+                ImpactedServicesChangeTicketMapping.objects.filter(
+                    service__in=services_related_to_business_function
+                ).values_list("change_ticket_application__change_ticket", flat=True)
+            )
+
+            # Filter ChangeTicket objects based on the obtained change_tickets_business_function
+            change_tickets_business_function = ChangeTicket.objects.filter(
+                pk__in=change_tickets_business_function
+            )
+            if application or service:
+                change_tickets = change_tickets.filter(
+                    pk__in=change_tickets_business_function.values_list("pk", flat=True)
+                )
+            else:
+                change_tickets = change_tickets_business_function
+
+        start_date = datetime.strptime(start_date, "%Y-%m-%d")
+        end_date = datetime.strptime(end_date, "%Y-%m-%d")
+        # Convert start_date and end_date to timezone-aware DateTime objects
+        start_date = timezone.make_aware(start_date)
+        end_date = timezone.make_aware(end_date) + timedelta(days=1)
+        change_tickets = change_tickets.filter(
+            created_at__range=(start_date, end_date)
+        ).order_by("created_at")
+        serializer = ChangeTicketSerializer(change_tickets, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ChangeTicketDetailsView(APIView):
+    from rest_framework.permissions import AllowAny
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        change_ticket_id = self.request.query_params.get("change_ticket_id", None)
+        change_ticket = ChangeTicket.objects.get(pk=change_ticket_id)
+        feature_tickets = FeatureTicket.objects.filter(change_ticket_id=change_ticket)
+        change_ticket_serializer = ChangeTicketSerializer(change_ticket)
+        feature_seralizer = FeatureTicketSerializer(feature_tickets, many=True)
+        change_ticket_application_mapping = (
+            ChangeTicketApplicationMapping.objects.filter(change_ticket=change_ticket)
+        )
+        application_service_mapping = []
+        for application_mapping in change_ticket_application_mapping:
+            mapping_dict = {}
+            application = application_mapping.application
+            application_name = application.name
+            mapping_dict[application_name] = []
+            impacted_services = ImpactedServicesChangeTicketMapping.objects.filter(
+                change_ticket_application=application_mapping
+            )
+            for impacted_service in impacted_services:
+                service_dict = {}
+                service_name = impacted_service.service.service_name
+                service_dict["service_name"] = service_name
+                business_function_tags = ServiceBusinessFunctionMapping.objects.filter(
+                    service=impacted_service.service
+                )
+                business_function_tags_list = [
+                    bf_tag.business_function.name for bf_tag in business_function_tags
+                ]
+                service_dict["business_function_tags"] = business_function_tags_list
+                mapping_dict[application_name].append(service_dict)
+            application_service_mapping.append(mapping_dict)
+
+        return Response(
+            {
+                "change_ticket": change_ticket_serializer.data,
+                "feature_change_ticket": feature_seralizer.data,
+                "application_service_mapping": application_service_mapping,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class ServicesApiview(APIView):
+    from rest_framework.permissions import AllowAny
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        service_name = request.query_params.get("name")
+        if service_name:
+            services = Services.objects.filter(service_name__icontains=service_name)
+        else:
+            services = Services.objects.all()
+        s = ServiceSerializer(services, many=True)
+        return Response(s.data, status=status.HTTP_200_OK)
+
+
+class ApplicationApiview(APIView):
+    from rest_framework.permissions import AllowAny
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        application_name = request.query_params.get("name")
+        if application_name:
+            applications = Application.objects.filter(name__icontains=application_name)
+        else:
+            applications = Application.objects.all()
+
+        s = ApplicationSerializer(applications, many=True)
+        return Response(s.data, status=status.HTTP_200_OK)
+
+
+class BusinessFunctionsApiview(APIView):
+    from rest_framework.permissions import AllowAny
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        business_function_name = request.query_params.get("name")
+        if business_function_name:
+            business_functions = BusinessFunctions.objects.filter(
+                name__icontains=business_function_name
+            )
+        else:
+            business_functions = BusinessFunctions.objects.all()
+        s = BusinessFunctionsSerializer(business_functions, many=True)
+        return Response(s.data, status=status.HTTP_200_OK)
+
+
+
+class GitRepoView(APIView, LimitOffsetPagination):
+
+    def create_or_update_credential_management(self,instance, validated_data):
+        cred_object = CredentialManagement.objects.filter(name=validated_data["name"])
+        if not cred_object:
+            cred_ser = CredentialManagementSerializer(data=validated_data)
+            if cred_ser.is_valid():
+                cred_ser.save()
+                cred_object = CredentialManagement.objects.filter(id=cred_ser.data["id"])
+        instance.credential=cred_object[0]
+        instance.save()
+        cred_data = CredentialManagementSerializer(cred_object[0])
+        print(3)
+        return instance, cred_data.data
+
+    def create_project_git_repo_mapping(self, git_repo, project_names):
+        for project in project_names:
+            try:
+                project_obj = Project.objects.get(name=project)
+            except Exception as error:
+                project_obj = Project.objects.create(name=project, description="Automated creation of application by system")
+            if not len(ProjectGitRepoMapping.objects.filter(project=project_obj, git_repo=git_repo)):
+                ProjectGitRepoMapping.objects.create(project=project_obj, git_repo=git_repo)
+        print(4)
+
+    def handle_csv(self, request):
+        file_path = str(Path.home()) + "/.common/upload/git_repo/"
+        file_name = list_of_file_handler(file_path=file_path, list_of_files=request.data)
+        file_name_with_path = os.path.join(file_path, file_name)
+        df = pd.read_csv(file_name_with_path)
+        for index, row in df.iterrows():
+            row_json = row.to_json()
+            data = json.loads(row_json)
+            data.pop("id")
+            data.pop("created_at")
+            data.pop("updated_at")
+            project_names = data.pop("application_names")
+            print("hereeee")
+            data["git_provider_id"] = SupportedGitProvider.objects.get(code=data["code"]).id
+            data["credential"] = {
+                "name":data["name.1"],
+                "credential":data["credential.1"],
+                "credential_type":data["credential_type"],
+                "password":data["password"],
+                "username":data["username"],
+                "user_id":request.user.id,
+                "key_value":data["key_value"]
+            }
+            
+            print("HII", data)
+            
+            git_repo_serializer = GitRepoSerializer(
+            data=data
+            )    
+            if git_repo_serializer.is_valid():
+                git_repo_serializer.save()
+                instance = GitRepo.objects.get(id=git_repo_serializer.data["id"])
+                instance, cred_data =self.create_or_update_credential_management(instance=instance,
+                                                            validated_data=data["credential"])
+                self.create_project_git_repo_mapping(git_repo=instance, project_names=project_names)
+                trigger_task_to_generate_git_repo_data(git_repo=instance)
+                
+            else:
+                return (str(git_repo_serializer.errors)), False
+        return {"detail:Git repo upload successful"}, True
+    def get_queryset(self):
+        queryset = GitRepo.objects.filter()
+        name = self.request.query_params.get("name", None)
+        credential_type = self.request.query_params.get("credential_type", None)
+        created_at = self.request.query_params.get("created_at", None)
+        updated_at = self.request.query_params.get("updated_at", None)
+        if name is not None:
+            queryset = queryset.filter(name__istartswith=name)
+        if credential_type is not None:
+            queryset = queryset.filter(credential_type=credential_type)
+        all_row = self.request.query_params.get("all", False)
+        if all_row:
+            self.default_limit = queryset.count()
+        # queryset = queryset_ordering(queryset=queryset, created_at=created_at, updated_at=updated_at)
+        return queryset
+
+    def get(self, request):
+        git_repo = self.get_queryset()
+        results = self.paginate_queryset(git_repo, request, view=self)
+        git_repo_serializer = ViewGitRepoSerializer(
+            results, many=True
+        )
+        return self.get_paginated_response(git_repo_serializer.data)
+        
+    def post(self, request):
+        print(request.data)
+
+        print(type(request.data))
+        bulk = self.request.query_params.get("bulk", None)
+        if bulk:
+            response, result = self.handle_csv(request)
+
+            if result:
+                return Response(
+                    response, status=status.HTTP_200_OK
+                )
+            else:
+                return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        if "user_id" not in request.data["credential"]:
+            request.data["credential"]["user_id"] = request.user.id
+        project_names = request.data["application_names"]
+        print(1)
+        git_repo_serializer = GitRepoSerializer(
+            data=request.data
+        )
+        if git_repo_serializer.is_valid():
+            git_repo_serializer.save()
+            instance = GitRepo.objects.get(id=git_repo_serializer.data["id"])
+            print(2)
+            instance, cred_data =self.create_or_update_credential_management(instance=instance,
+                                                        validated_data=request.data["credential"])
+            self.create_project_git_repo_mapping(git_repo=instance, project_names=project_names)
+            print(5)
+            trigger_task_to_generate_git_repo_data(git_repo=instance)
+                
+            git_repo_serializer_data = ViewGitRepoSerializer(instance).data
+            
+            return Response(
+                git_repo_serializer_data, status=status.HTTP_200_OK
+            )
+        else:
+            return Response(
+                git_repo_serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+
+class GitRepoUpdateView(APIView):
+    def create_project_git_repo_mapping(self, git_repo, project_names):
+        for project in project_names:
+            try:
+                project_obj = Project.objects.get(name=project)
+            except Exception as error:
+                project_obj = Project.objects.create(name=project, description="Automated creation of application by system")
+            if not len(ProjectGitRepoMapping.objects.filter(project=project_obj, git_repo=git_repo)):
+                ProjectGitRepoMapping.objects.create(project=project_obj, git_repo=git_repo)
+        
+
+    def create_or_update_credential_management(self,instance, validated_data):
+        cred_object = CredentialManagement.objects.filter(name=validated_data["name"])
+        if not cred_object:
+            cred_ser = CredentialManagementSerializer(data=validated_data)
+            if cred_ser.is_valid():
+                cred_ser.save()
+                cred_object = CredentialManagement.objects.filter(id=cred_ser.data["id"])
+        instance.credential=cred_object[0]
+        instance.save()
+        cred_data = CredentialManagementSerializer(cred_object[0])
+        return instance, cred_data.data
+
+    def get(self, request, pk):
+        try:
+            git_repo = GitRepo.objects.get(
+                pk=pk
+            )
+        except GitRepo.DoesNotExist:
+            raise Http404
+        
+        git_repo_serializer = ViewGitRepoSerializer(
+            git_repo
+        )
+        return Response(git_repo_serializer.data)
+        
+    def post(self, request, pk):
+        try:
+            git_repo_object = GitRepo.objects.get(
+                pk=request.data["id"]
+            )
+        except GitRepo.DoesNotExist:
+            raise Http404
+        git_repo_serializer = GitRepoSerializer(
+            git_repo_object, data=request.data
+            )
+        project_names = request.data["application_names"]
+        
+        if git_repo_serializer.is_valid():
+            git_repo_serializer.save()
+            instance = GitRepo.objects.get(id=git_repo_serializer.data["id"])
+            
+            instance, cred_data =self.create_or_update_credential_management(instance=instance,
+                                                        validated_data=request.data["credential"])
+            self.create_project_git_repo_mapping(git_repo=instance, project_names=project_names)
+            git_repo_serializer_data = ViewGitRepoSerializer(instance).data
+            # git_repo_serializer_data["credential_management"] = cred_data
+            
+            return Response(
+                git_repo_serializer_data, status=status.HTTP_200_OK
+            )
+        else:
+            return Response(
+                git_repo_serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+    def delete(self, request, pk):
+        try:
+            git_repo_object = GitRepo.objects.get(
+                pk=request.data["id"]
+            )
+        
+            operation = git_repo_object.delete()
+
+        except Exception as e:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        if operation:
+            return Response({'detail': 'Deleted successfully'}, status=status.HTTP_200_OK)
+        else:
+            return Response({'detail': 'Bad Request'}, status=status.HTTP_400_BAD_REQUEST)
+        
+from django.db.models import Count, Func, Value
+from django.db.models.functions import ExtractWeek, ExtractYear, TruncDate, ExtractMonth, Concat
+from datetime import datetime
+from django.http import JsonResponse
+
+
+class DeveloperDashboardDataApi(APIView):
+    def create_frontend_json_from_queryset(self, results):
+        result_json = {"overall":{}}
+        for user in results:
+            result_json[user["user__name"]] = {"number_of_commits":user["number_of_commits"]}
+            if "number_of_commits" not in result_json['overall']:
+                result_json['overall']['number_of_commits'] = 0
+            if "total_users" not in result_json['overall']:
+                result_json['overall']['total_users'] = 0
+            
+            result_json['overall']['number_of_commits'] += user["number_of_commits"]
+            result_json['overall']['total_users'] +=1
+        return result_json
+    
+    def create_trend_json(self, results, trend_results):
+        results["trend"]={}
+        for key in results["overall"]:
+            if key not in results["trend"]:
+                if key == "total_users":
+                    continue
+                if key not in trend_results['overall']:
+                    
+                    results['trend'][key] = 0
+                else:
+                    
+                    results['trend'][key] = ((results['overall'][key]-trend_results['overall'][key])/trend_results['overall'][key])*100
+        return results
+    
+
+    def get(self, request):
+        unit = request.query_params.get('unit', None)
+        start_date_str = request.query_params.get('start_date', None)
+        end_date_str = request.query_params.get('end_date', None)
+        trend_start_date_str = request.query_params.get('trend_start_date', None)
+        trend_end_date_str = request.query_params.get('trend_end_date', None)
+        application = request.query_params.get('application')
+        start_date = datetime(int(start_date_str.split("-")[2]), int(start_date_str.split("-")[1]), int(start_date_str.split("-")[0]))
+        end_date = datetime(int(end_date_str.split("-")[2]),int(end_date_str.split("-")[1]),int(end_date_str.split("-")[0]))
+        trend_start_date = datetime(int(trend_start_date_str.split("-")[2]), int(trend_start_date_str.split("-")[1]), int(trend_start_date_str.split("-")[0]))
+        trend_end_date = datetime(int(trend_end_date_str.split("-")[2]),int(trend_end_date_str.split("-")[1]),int(trend_end_date_str.split("-")[0]))
+        
+        if application:
+            results = (
+            DeveloperDashboardData.objects
+            .filter(date__range=(start_date, end_date), project__name=application)
+            .values('user__name')
+            .annotate(number_of_commits=Count('user__name'))
+            .order_by('user__name')
+            )
+            trend_results = (
+            DeveloperDashboardData.objects
+            .filter(date__range=(trend_start_date, trend_end_date), project__name=application)
+            .values('user__name')
+            .annotate(number_of_commits=Count('user__name'))
+            .order_by('user__name')
+            )
+            project_id_list = Project.objects.filter(name=application).values_list('id', flat=True)
+        else:
+            project_id_list = Project.objects.filter().values_list('id', flat=True)
+            results = (
+            DeveloperDashboardData.objects
+            .filter(date__range=(start_date, end_date))
+            .values('user__name')
+            .annotate(number_of_commits=Count('user__name'))
+            .order_by('user__name')
+            )
+            trend_results = (
+            DeveloperDashboardData.objects
+            .filter(date__range=(trend_start_date, trend_end_date))
+            .values('user__name')
+            .annotate(number_of_commits=Count('user__name'))
+            .order_by('user__name')
+            )
+
+        no_of_git_repo = len(ProjectGitRepoMapping.objects.filter(project__id__in=project_id_list).values_list("git_repo_id", flat=True).distinct())
+        results = self.create_frontend_json_from_queryset(results=list(results))
+        trend_results = self.create_frontend_json_from_queryset(results=list(trend_results))
+        results=self.create_trend_json(results, trend_results)
+        results["overall"]["total_git_repo"] = no_of_git_repo
+        
+        return JsonResponse(results, safe=False)
+from datetime import date
+
+class DeveloperDashboardUserDataApi(APIView):
+    def get_last_activity_details(self,user_name):
+        try:
+            user = User.objects.get(name=user_name)
+        except User.DoesNotExist:
+            return None
+
+        last_merged_pr_date = DeveloperDashboardPRData.objects.filter(merger_user=user).order_by('-date').first()
+        last_raised_pr_date = DeveloperDashboardPRData.objects.filter(author_user=user).order_by('-date').first()
+        last_commit_date = DeveloperDashboardData.objects.filter(user=user).order_by('-date').first()
+        last_dates=[]
+        if last_merged_pr_date:
+            last_dates.append(last_merged_pr_date.date) 
+        if last_raised_pr_date:
+            last_dates.append(last_raised_pr_date.date)
+        if last_commit_date:
+            last_dates.append(last_commit_date.date)
+        last_activity_date = max(last_dates)
+        if not last_dates:
+            return None
+        merged_prs=DeveloperDashboardPRData.objects.filter(merger_user=user, date=last_activity_date).values('project__name').annotate(count=Count('id'))
+        raised_prs = DeveloperDashboardPRData.objects.filter(author_user=user, date=last_activity_date).values('project__name').annotate(count=Count('id'))
+        commits = DeveloperDashboardData.objects.filter(user=user, date=last_activity_date).values('project__name').annotate(count=Count('id'))
+        # merged_prs = len(DeveloperDashboardPRData.objects.filter(merger_user=user, date=last_activity_date))
+        # raised_prs = len(DeveloperDashboardPRData.objects.filter(author_user=user, date=last_activity_date))
+        # commits = len(DeveloperDashboardData.objects.filter(user=user, date=last_activity_date))
+
+        return {
+            'last_activity_date': last_activity_date,
+            'merged_prs': list(merged_prs),
+            'raised_prs': list(raised_prs),
+            'commits': list(commits),
+        }
+
+    def create_frontend_json_from_queryset_merged(self, results):
+        result_json = {}
+        for user_object in results:
+            if not user_object["merger_user__name"]:
+                continue
+            if user_object["merger_user__name"] not in result_json:
+                result_json[user_object["merger_user__name"]] = {"pr_merged" : 0}
+            result_json[user_object["merger_user__name"]]["pr_merged"]+=user_object["state_count"]
+        return result_json
+    
+    def create_frontend_json_from_queryset_author(self, results, result_json):
+        for user_object in results:
+            if not user_object["author_user__name"]:
+                continue
+            if user_object["author_user__name"] not in result_json:
+                result_json[user_object["author_user__name"]] = {}
+            if "pr_raised" not in result_json[user_object["author_user__name"]]:
+                result_json[user_object["author_user__name"]]["pr_raised"]={}    
+            if user_object["state"] not in result_json[user_object["author_user__name"]]["pr_raised"]:
+                result_json[user_object["author_user__name"]]["pr_raised"][user_object["state"]]=0    
+            result_json[user_object["author_user__name"]]["pr_raised"][user_object["state"]]+=user_object["state_count"]
+        return result_json
+    
+    def create_frontend_json_from_queryset_commit(self, results, result_json):
+        print(result_json)
+        for user in results:
+            if user["user__name"] not in result_json:
+                result_json[user["user__name"]]={}
+            if "number_of_commits" not in result_json[user["user__name"]]:
+                result_json[user["user__name"]]["number_of_commits"]=0     
+            result_json[user["user__name"]]["number_of_commits"]=user["number_of_commits"]
+        return result_json
+    
+    def create_pr_data(self, start_date, end_date, application=None):
+        if application:
+            merge_data  = (DeveloperDashboardPRData.objects
+                       .filter(date__range=(start_date, end_date), project__name=application)
+                       .values("merger_user__name", "state")
+                       .annotate(state_count=Count('id', distinct=True))
+                    )
+        else:
+            merge_data  = (DeveloperDashboardPRData.objects
+                       .filter(date__range=(start_date, end_date))
+                       .values("merger_user__name", "state")
+                       .annotate(state_count=Count('id', distinct=True))
+                    )
+        if application:
+            author_data  = (DeveloperDashboardPRData.objects
+                       .filter(date__range=(start_date, end_date), project__name=application)
+                       .values("author_user__name", "state")
+                       .annotate(state_count=Count('id', distinct=True))
+                    )
+        else:
+            author_data  = (DeveloperDashboardPRData.objects
+                       .filter(date__range=(start_date, end_date))
+                       .values("author_user__name", "state")
+                       .annotate(state_count=Count('id', distinct=True))
+                    )
+        return merge_data, author_data
+    
+    def create_commit_data(self, start_date, end_date, application=None):
+        if application:
+            results = (
+            DeveloperDashboardData.objects
+            .filter(date__range=(start_date, end_date), project__name=application)
+            .values('user__name')
+            .annotate(number_of_commits=Count('user__uuid'))
+            .order_by('user__name')
+            )
+            
+        else:
+            results = (
+            DeveloperDashboardData.objects
+            .filter(date__range=(start_date, end_date))
+            .values('user__name')
+            .annotate(number_of_commits=Count('user__uuid'))
+            .order_by('user__name')
+            )
+        return results
+    
+    def get(self, request):
+        unit = request.query_params.get('unit', None)
+        start_date_str = request.query_params.get('start_date', None)
+        end_date_str = request.query_params.get('end_date', None)
+        application = request.query_params.get('application', None)
+        start_date = datetime(int(start_date_str.split("-")[2]), int(start_date_str.split("-")[1]), int(start_date_str.split("-")[0]))
+        end_date = datetime(int(end_date_str.split("-")[2]),int(end_date_str.split("-")[1]),int(end_date_str.split("-")[0]))
+        if application:
+            merge_data, author_data = self.create_pr_data(start_date, end_date, application)
+            commit_data = self.create_commit_data(start_date, end_date, application)
+        else:
+            merge_data, author_data = self.create_pr_data(start_date, end_date)
+            commit_data = self.create_commit_data(start_date, end_date)
+        merge_data_results = self.create_frontend_json_from_queryset_merged(results=list(merge_data))
+        author_data_results = self.create_frontend_json_from_queryset_author(results=list(author_data), result_json=merge_data_results)
+        commit_data_results = self.create_frontend_json_from_queryset_commit(results=list(commit_data), result_json=author_data_results)
+        for user in commit_data_results:
+            commit_data_results[user]["last_activity"]=self.get_last_activity_details(user)
+        return JsonResponse(commit_data_results, safe=False)
+    
+from django.db.models import Count, Q
+
+class DeveloperDashboardApplicationDataApi(APIView):
+
+    def create_commit_data(self,start_date, end_date, application):
+        if application:
+            commit_data_query = DeveloperDashboardData.objects.filter(
+                                    date__range=(start_date, end_date),
+                                    project__name=application).values('project__name').annotate(
+                                    number_of_developers=Count('user_id', distinct=True),
+                                    number_of_commits=Count('id'))
+        else:
+            commit_data_query = DeveloperDashboardData.objects.filter(
+                                    date__range=(start_date, end_date)).values('project__name').annotate(
+                                    number_of_developers=Count('user_id', distinct=True),
+                                    number_of_commits=Count('id'))
+        return commit_data_query
+    
+    def create_pr_data(self,start_date, end_date, application):
+        if application:
+            pr_query = DeveloperDashboardPRData.objects.filter(
+                                            date__range=(start_date, end_date),
+                                            project__name=application).values('project__name').annotate(
+                                            with_merger_user_id=Count('id', filter=Q(merger_user_id__isnull=False)),
+                                            without_merger_user_id=Count('id', filter=Q(merger_user_id__isnull=True))
+                                            )
+        else:
+            pr_query = DeveloperDashboardPRData.objects.filter(
+                                            date__range=(start_date, end_date)
+                                            ).values('project__name').annotate(
+                                            with_merger_user_id=Count('id', filter=Q(merger_user_id__isnull=False)),
+                                            without_merger_user_id=Count('id', filter=Q(merger_user_id__isnull=True))
+                                            )
+        return pr_query
+    def create_frontend_json(self,commit_data, pr_data):
+        result_json = {}
+        for project_object in commit_data:
+            result_json[project_object["project__name"]] = {}
+            if "number_of_developers" in project_object:
+                if project_object["project__name"] in result_json:
+                    result_json[project_object["project__name"]]["developers"] = project_object["number_of_developers"]
+                else:
+                    result_json[project_object["project__name"]]={}
+                    result_json[project_object["project__name"]]["developers"] = project_object["number_of_developers"]
+            if "number_of_commits" in project_object:
+                if  project_object["project__name"] in result_json:
+                    result_json[project_object["project__name"]]["number_of_commits"]=project_object["number_of_commits"]
+                else:
+                    result_json[project_object["project__name"]]={}
+                    result_json[project_object["project__name"]]["number_of_commits"]=project_object["number_of_commits"]
+        for project_object in pr_data:
+            if "with_merger_user_id" in project_object:
+                if project_object["project__name"] in result_json:
+                    result_json[project_object["project__name"]]["pr_merged"]=project_object["with_merger_user_id"]
+                else:
+                    result_json[project_object["project__name"]]={}
+                    result_json[project_object["project__name"]]["pr_merged"]=project_object["with_merger_user_id"]
+            if "without_merger_user_id" in project_object:
+                if project_object["project__name"] in result_json:
+                    result_json[project_object["project__name"]]["pr_open"]=project_object["without_merger_user_id"]
+                else:
+                    result_json[project_object["project__name"]]={}
+                    result_json[project_object["project__name"]]["pr_open"]=project_object["without_merger_user_id"]
+        return result_json    
+
+    def create_final_json(self, collective_data, trend_collective_data):
+        
+        for project in collective_data:
+            collective_data[project]["trend"]={}
+            for key in collective_data[project]:
+                try:
+                    if key == "trend":
+                        continue
+                    if key not in collective_data[project]["trend"]:
+                        collective_data[project]['trend'][key] = ((collective_data[project][key]-trend_collective_data[project][key])/trend_collective_data[project][key])*100
+                except ZeroDivisionError:
+                    collective_data[project]["trend"][key] = 0
+        return collective_data
+
+    def get(self, request):
+        start_date_str = request.query_params.get('start_date', None)
+        end_date_str = request.query_params.get('end_date', None)
+        trend_start_date_str = request.query_params.get('trend_start_date', None)
+        trend_end_date_str = request.query_params.get('trend_end_date', None)
+        application = request.query_params.get('application', None)
+        start_date = datetime(int(start_date_str.split("-")[2]), int(start_date_str.split("-")[1]), int(start_date_str.split("-")[0]))
+        end_date = datetime(int(end_date_str.split("-")[2]),int(end_date_str.split("-")[1]),int(end_date_str.split("-")[0]))
+        trend_start_date = datetime(int(trend_start_date_str.split("-")[2]), int(trend_start_date_str.split("-")[1]), int(trend_start_date_str.split("-")[0]))
+        trend_end_date = datetime(int(trend_end_date_str.split("-")[2]),int(trend_end_date_str.split("-")[1]),int(trend_end_date_str.split("-")[0]))
+        
+        commit_data = self.create_commit_data(start_date=start_date, end_date=end_date, application=application)
+        pr_data = self.create_pr_data(start_date=start_date, end_date=end_date, application=application)
+        collective_data = self.create_frontend_json(list(commit_data), list(pr_data))
+        trend_commit_data = self.create_commit_data(start_date=trend_start_date, end_date=trend_end_date, application=application)
+        trend_pr_data = self.create_pr_data(start_date=trend_start_date, end_date=trend_end_date, application=application)
+        trend_collective_data = self.create_frontend_json(list(trend_commit_data), list(trend_pr_data))
+        final_json = self.create_final_json(collective_data, trend_collective_data)
+        return JsonResponse(final_json, safe=False)
+
+class DeveloperDashboardPRDataApi(APIView):
+    def create_frontend_json_from_queryset_merged(self, results):
+        result_json = {"overall":{}}
+        result_json["overall"]["pr_merged"] = 0
+        for user_object in results:
+            if not user_object["merger_user__name"]:
+                continue
+            if user_object["merger_user__name"] not in result_json:
+                result_json[user_object["merger_user__name"]] = {"pr_merged" : 0}
+            result_json[user_object["merger_user__name"]]["pr_merged"]+=user_object["state_count"]
+            result_json["overall"]["pr_merged"] += user_object["state_count"]
+        return result_json
+    
+    def create_frontend_json_from_queryset_author(self, results, result_json):
+        result_json["overall"]["pr_raised"] = 0
+        for user_object in results:
+            if not user_object["author_user__name"]:
+                continue
+            if user_object["author_user__name"] not in result_json:
+                result_json[user_object["author_user__name"]] = {}
+            if "pr_raised" not in result_json[user_object["author_user__name"]]:
+                result_json[user_object["author_user__name"]]["pr_raised"]={}    
+            
+            if user_object["state"] not in result_json[user_object["author_user__name"]]["pr_raised"]:
+                result_json[user_object["author_user__name"]]["pr_raised"][user_object["state"]]=0    
+            result_json[user_object["author_user__name"]]["pr_raised"][user_object["state"]]+=user_object["state_count"]
+            result_json["overall"]["pr_raised"]+=user_object["state_count"]
+        return result_json
+    
+    def create_trend_json(self, results, trend_results):
+        results["trend"]={}
+        for key in results["overall"]:
+            try:
+                if key not in results["trend"]:
+                    results['trend'][key] = ((results['overall'][key]-trend_results['overall'][key])/trend_results['overall'][key])*100
+            except ZeroDivisionError:
+                results["trend"][key] = 0
+        return results
+    
+    def create_pr_data(self, start_date, end_date, application=None):
+        if application:
+            merge_data  = (DeveloperDashboardPRData.objects
+                       .filter(date__range=(start_date, end_date), project__name=application)
+                       .values("merger_user__name", "state")
+                       .annotate(state_count=Count('id', distinct=True))
+                    )
+        else:
+            merge_data  = (DeveloperDashboardPRData.objects
+                       .filter(date__range=(start_date, end_date))
+                       .values("merger_user__name", "state")
+                       .annotate(state_count=Count('id', distinct=True))
+                    )
+        if application:
+            author_data  = (DeveloperDashboardPRData.objects
+                       .filter(date__range=(start_date, end_date), project__name=application)
+                       .values("author_user__name", "state")
+                       .annotate(state_count=Count('id', distinct=True))
+                    )
+        else:
+            author_data  = (DeveloperDashboardPRData.objects
+                       .filter(date__range=(start_date, end_date))
+                       .values("author_user__name", "state")
+                       .annotate(state_count=Count('id', distinct=True))
+                    )
+        return merge_data, author_data
+
+    def get(self, request):
+        unit = request.query_params.get('unit', None)
+        start_date_str = request.query_params.get('start_date', None)
+        end_date_str = request.query_params.get('end_date', None)
+        trend_start_date_str = request.query_params.get('trend_start_date', None)
+        trend_end_date_str = request.query_params.get('trend_end_date', None)
+        application = request.query_params.get('application', None)
+        start_date = datetime(int(start_date_str.split("-")[2]), int(start_date_str.split("-")[1]), int(start_date_str.split("-")[0]))
+        end_date = datetime(int(end_date_str.split("-")[2]),int(end_date_str.split("-")[1]),int(end_date_str.split("-")[0]))
+        trend_start_date = datetime(int(trend_start_date_str.split("-")[2]), int(trend_start_date_str.split("-")[1]), int(trend_start_date_str.split("-")[0]))
+        trend_end_date = datetime(int(trend_end_date_str.split("-")[2]),int(trend_end_date_str.split("-")[1]),int(trend_end_date_str.split("-")[0]))
+        if application:
+            merge_data, author_data = self.create_pr_data(start_date, end_date, application)
+            trend_merge_data, trend_author_data = self.create_pr_data(trend_start_date, trend_end_date, application)
+        else:
+            merge_data, author_data = self.create_pr_data(start_date, end_date)
+            trend_merge_data, trend_author_data = self.create_pr_data(trend_start_date, trend_end_date)
+        merge_data_results = self.create_frontend_json_from_queryset_merged(results=list(merge_data))
+        author_data_results = self.create_frontend_json_from_queryset_author(results=list(author_data), result_json=merge_data_results)
+        merge_trend_results = self.create_frontend_json_from_queryset_merged(results=list(trend_merge_data))
+        author_trend_results = self.create_frontend_json_from_queryset_author(results=list(trend_author_data),result_json=merge_trend_results)
+        results=self.create_trend_json(author_data_results, author_trend_results)
+        
+        return JsonResponse(results, safe=False)
+
+class ProjectListApi(APIView, LimitOffsetPagination):
+    def get_queryset(self):
+        queryset = Project.objects.filter()
+        name = self.request.query_params.get("name", None)
+        if name is not None:
+            queryset = queryset.filter(name__istartswith=name)
+        all_row = self.request.query_params.get("all", False)
+        if all_row:
+            self.default_limit = queryset.count()
+        # queryset = queryset_ordering(queryset=queryset, created_at=created_at, updated_at=updated_at)
+        return queryset
+
+    def get(self, request):
+        projects = self.get_queryset()
+        results = self.paginate_queryset(projects, request, view=self)
+        project_serializer = ProjectSerializer(
+            results, many=True
+        )
+        return self.get_paginated_response(project_serializer.data)
+    
+    def handle_csv(self, request):
+        file_path = str(Path.home()) + "/.common/upload/project/"
+        file_name = list_of_file_handler(file_path=file_path, list_of_files=request.data)
+        file_name_with_path = os.path.join(file_path, file_name)
+        df = pd.read_csv(file_name_with_path)
+        for index, row in df.iterrows():
+            row_json = row.to_json()
+            data = json.loads(row_json)
+            data.pop("id", None)
+            data.pop("created_at", None)
+            data.pop("updated_at", None)
+            
+            project_serializer = ProjectSerializer(
+            data=data
+            )    
+            if project_serializer.is_valid():
+                project_serializer.save()
+                
+            else:
+                return (str(project_serializer.errors)), False
+        return {"detail:Project upload successful"}, True
+    
+        
+    def post(self, request):
+        bulk = self.request.query_params.get("bulk", None)
+        if bulk:
+            response, result = self.handle_csv(request)
+
+            if result:
+                return Response(
+                    response, status=status.HTTP_200_OK
+                )
+            else:
+                return Response(response, status=status.HTTP_400_BAD_REQUEST)
+        
+        project_serializer = ProjectSerializer(
+            data=request.data
+        )
+        if project_serializer.is_valid():
+            project_serializer.save()
+            return Response(
+                project_serializer.data, status=status.HTTP_200_OK
+            )
+        else:
+            return Response(
+                project_serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
+class ProjectUpdateView(APIView):
+
+
+    def get(self, request, pk):
+        try:
+            project = Project.objects.get(
+                pk=pk
+            )
+        except Project.DoesNotExist:
+            raise Http404
+        
+        project_serializer = ProjectSerializer(
+            project
+        )
+        return Response(project_serializer.data)
+        
+    def post(self, request, pk):
+        try:
+            project = Project.objects.get(
+                pk=request.data["id"]
+            )
+        except GitRepo.DoesNotExist:
+            raise Http404
+        project_serializer = ProjectSerializer(
+            project, data=request.data
+            )
+        
+        if project_serializer.is_valid():
+            project_serializer.save()
+            return Response(
+                project_serializer.data, status=status.HTTP_200_OK
+            )
+        else:
+            return Response(
+                project_serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        
+    def delete(self, request, pk):
+        try:
+            project = Project.objects.get(
+                pk=request.data["id"]
+            )
+        
+            operation = project.delete()
+
+        except Exception as e:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        if operation:
+            return Response({'detail': 'Deleted successfully'}, status=status.HTTP_200_OK)
+        else:
+            return Response({'detail': 'Bad Request'}, status=status.HTTP_400_BAD_REQUEST)
+        
