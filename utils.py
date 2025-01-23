@@ -255,7 +255,7 @@ def get_metal_score(metal):
     try:
         metal_rating = MetalRating.objects.get(name=metal)
     except MetalRating.DoesNotExist as err:
-        return 0
+        return None
     else:
         return metal_rating.upper_limit
 
@@ -1149,8 +1149,11 @@ def add_level(group, index):
         return get_metal_score(group['level'])+get_metal_score(index['level'])
     elif type(group['level']) == int and index['level'] in ["ELITE","HIGH","MEDIUM","LOW"]:
         return group['level']+get_metal_score(index['level'])
-    else:
+    elif type(group['level']) == int and type(index['level']) == int:
         return group['level'] + index['level']
+    else:
+        return None
+        
 
 
 def set_group_level_for_average_stategy(org, app_name, service, application_service_dict, application_level_group_all, metric_group_metric_index_mapping, group):
@@ -1419,7 +1422,9 @@ def set_application_level_metric_group_data(org, app_name, application_service, 
             try:
                 level = application_level_service_group_data[service][
                     "metric_group_data"][group]["overview"]["level"]
-                level_score += get_metal_score(level)
+                value=get_metal_score(level)
+                if value:
+                    level_score += get_metal_score(level)
             except Exception as e:
                 continue
 
@@ -1429,7 +1434,9 @@ def set_application_level_metric_group_data(org, app_name, application_service, 
             except Exception as e:
                 continue
             else:
-                mon_score += get_metal_score(mon)
+                mon_value=get_metal_score(mon)
+                if mon_value:
+                    mon_score += mon_value
         if group not in app_group_data[f"{org}.{app_name}"]["metric_group_data"]:
             app_group_data[f"{org}.{app_name}"]["metric_group_data"][group] = {
                 "overview": {},
